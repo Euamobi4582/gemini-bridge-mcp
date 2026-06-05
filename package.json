@@ -1,0 +1,38 @@
+{
+  "name": "gemini-bridge-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that drives the logged-in Google Gemini web UI: ask questions (multimodal), generate images (Nano Banana) and videos (Veo) — no API key.",
+  "type": "module",
+  "bin": {
+    "gemini-bridge-mcp": "server.js"
+  },
+  "scripts": {
+    "login": "node server.js login",
+    "start": "node server.js",
+    "http": "node server.js http"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gemini",
+    "google-gemini",
+    "nano-banana",
+    "veo",
+    "playwright",
+    "image-generation",
+    "video-generation"
+  ],
+  "license": "MIT",
+  "author": "NotFabii",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NotFabii/gemini-bridge-mcp.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "playwright-core": "^1.49.0"
+  }
+}

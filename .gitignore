@@ -1,0 +1,7 @@
+node_modules/
+.gemini-profile/
+output/
+certs/
+debug-*.png
+*.log
+package-lock.json
