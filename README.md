@@ -104,6 +104,15 @@ node server.js http                           # run as a Streamable-HTTP MCP ser
 `http://localhost:7801/mcp` (CORS enabled). Drop `cert.pem` / `key.pem` into `./certs/`
 (or set `GEMINI_TLS_CERT` / `GEMINI_TLS_KEY`) to serve it over `https`.
 
+## ⚠️ Locale note (important)
+
+Some selectors match the **German** Gemini UI (e.g. `Dateien hochladen`,
+`Bild erstellen`, `Video erstellen`, `Modusauswahl öffnen`, `Jetzt ausprobieren`).
+If your Gemini is in another language, edit the marked values in the `SEL` object
+(and the `Jetzt ausprobieren` regex) in `server.js` to the matching labels —
+for English that's `Upload files`, `Create image`, `Create video`, etc.
+`node server.js dump` prints the current button labels to help.
+
 ## Maintenance
 
 Because this drives the **web UI**, Google's UI changes can break the selectors. They
@@ -118,6 +127,12 @@ risk, for personal use only**. Don't be surprised if a UI change breaks it, or i
 automated use gets your account rate-limited or flagged. Provided **"as is"**, without
 warranty. Not affiliated with Google or Anthropic. "Gemini", "Nano Banana" and "Veo" are
 products/trademarks of Google.
+
+## Acknowledgements
+
+Designed and coded with the help of **[Claude Code](https://claude.com/claude-code)**
+(Anthropic's **Claude Opus 4.8**, with extended thinking) — from reverse-engineering the
+Gemini web UI selectors to the image/video extraction and the MCP wiring.
 
 ## License
 

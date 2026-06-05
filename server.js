@@ -2,19 +2,21 @@
 /**
  * gemini-bridge-mcp
  * -----------------
- * Ein MCP-Server, der mit deiner EINGELOGGTEN Gemini-Weboberflaeche
- * (gemini.google.com) per Browser-Automation spricht. Kein API-Key,
- * keine API-Kosten -- alles laeuft ueber dein Google-AI-Pro-Abo,
- * genau so als wuerdest du selbst tippen.
+ * An MCP server that talks to your LOGGED-IN Gemini web UI
+ * (gemini.google.com) via browser automation. No API key, no API cost --
+ * it all runs through your normal Gemini subscription, exactly as if you
+ * were typing in the browser yourself.
  *
- * Nutzt dein installiertes Chrome (playwright-core, channel: "chrome")
- * und ein eigenes, persistentes Login-Profil unter ./.gemini-profile,
- * damit der Login nur EINMAL noetig ist.
+ * Uses your installed Chromium browser (playwright-core; Chrome/Brave/Edge,
+ * auto-detected) and its own persistent login profile under ./.gemini-profile,
+ * so you only have to log in ONCE.
  *
- * Modi:
- *   node server.js login        -> Fenster oeffnen, einmalig einloggen
- *   node server.js ask "Frage"  -> Schnelltest auf der Kommandozeile
- *   node server.js              -> als MCP-Server ueber stdio (fuer Claude Code)
+ * Modes:
+ *   node server.js login        -> open a window, log in once
+ *   node server.js ask "..."    -> quick CLI test
+ *   node server.js              -> run as an MCP server over stdio
+ *
+ * Built with the help of Claude Code (Anthropic's Claude Opus 4.8, extended thinking).
  */
 
 import { chromium } from "playwright-core";
@@ -26,9 +28,8 @@ import os from "node:os";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
-// Chromium-Binary finden (Chrome ist hier nicht installiert -> Brave/Edge).
-// Reihenfolge: explizit gesetzt -> Chrome -> Brave -> Edge.
-// Mit GEMINI_BROWSER_PATH laesst sich ein fixer Pfad erzwingen.
+// Locate a Chromium binary. Order: explicit env -> Chrome -> Brave -> Edge.
+// Set GEMINI_BROWSER_PATH to force a specific path.
 // ---------------------------------------------------------------------------
 function resolveBrowser() {
   const home = os.homedir();
@@ -45,13 +46,20 @@ function resolveBrowser() {
     path.join(PF, "BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
     path.join(PF, "Microsoft\\Edge\\Application\\msedge.exe"),
     path.join(PF86, "Microsoft\\Edge\\Application\\msedge.exe"),
+    // Common Linux / macOS locations:
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/brave-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
   ].filter(Boolean);
 
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
   }
   throw new Error(
-    "Kein Chromium-Browser (Chrome/Brave/Edge) gefunden. Setze GEMINI_BROWSER_PATH auf deine chrome.exe/brave.exe."
+    "No Chromium browser (Chrome/Brave/Edge) found. Set GEMINI_BROWSER_PATH to your chrome.exe / brave.exe / chrome binary."
   );
 }
 
@@ -64,32 +72,40 @@ const BROWSER_PATH = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// Konfiguration -- bei UI-Aenderungen von Google hier anpassen.
+// Configuration.
 // ---------------------------------------------------------------------------
 const GEMINI_URL = "https://gemini.google.com/app";
 const USER_DATA_DIR =
   process.env.GEMINI_PROFILE_DIR || path.join(__dirname, ".gemini-profile");
 const HEADLESS = process.env.GEMINI_HEADLESS === "1";
 
+// Selectors / UI strings.
+//
+// NOTE: some of the values below match the *German* Gemini web UI
+// ("Dateien hochladen", "Bild erstellen", "Video erstellen",
+// "Modusauswahl öffnen", "Jetzt ausprobieren", ...). If your Gemini UI is in
+// another language, change them to the matching labels (English would be
+// "Upload files", "Create image", "Create video", ...). Run
+// `node server.js dump` to print the current button labels.
 const SEL = {
-  // Eingabefeld (Quill-Editor, contenteditable). Locale-unabhaengig ueber Klasse.
+  // Input field (Quill editor, contenteditable). Locale-independent via class.
   editor: 'div.ql-editor[contenteditable="true"]',
-  // Antwort-Container (Web-Component) + Markdown-Body darin.
+  // Response container (web component) + its markdown body.
   response: "model-response",
   responseText: ".markdown",
-  // "+"-Knopf, der das Upload-/Tools-Menue oeffnet. Per Rolle/Name ansprechen
-  // (CSS-Attribut-Selektor scheitert am "&" -> CSS-Nesting-Token).
+  // "+" button that opens the upload/tools menu. Matched by role/name
+  // (a CSS attribute selector fails on the "&" -> CSS nesting token).
   uploadTriggerName: "Uploads & Tools",
-  // Menuepunkt "Dateien hochladen" (oeffnet den Datei-Dialog).
+  // Menu item "Upload files" (opens the file dialog). [German UI label]
   uploadMenuItemText: "Dateien hochladen",
-  // Modell-Auswahl (Dropdown) -- Trigger per Teil-Name.
+  // Model picker (dropdown) -- trigger matched by partial name. [German UI label]
   modelTriggerName: /Modusauswahl öffnen/i,
-  // Modus-Umschalter im "+"-Menue (role=menuitemcheckbox).
+  // Mode toggles in the "+" menu (role=menuitemcheckbox). [German UI labels]
   imageModeName: /Bild erstellen/i,
   videoModeName: /Video erstellen/i,
 };
 
-// Benutzerfreundliche Modell-Schluessel -> Menuepunkt-Name im Dropdown.
+// Friendly model keys -> menu-item name in the dropdown.
 const MODEL_MAP = {
   "flash-lite": /3\.1 Flash-Lite/i,
   "3.1-flash-lite": /3\.1 Flash-Lite/i,
@@ -99,11 +115,11 @@ const MODEL_MAP = {
   "3.1-pro": /3\.1 Pro/i,
 };
 
-// Ausgabeordner fuer generierte Bilder/Videos.
+// Output folder for generated images/videos.
 const OUTPUT_DIR = process.env.GEMINI_OUTPUT_DIR || path.join(__dirname, "output");
 
 // ---------------------------------------------------------------------------
-// Browser-Singleton (bleibt zwischen Tool-Aufrufen offen).
+// Browser singleton (stays open between tool calls).
 // ---------------------------------------------------------------------------
 let ctx = null;
 let page = null;
@@ -111,16 +127,16 @@ let page = null;
 async function launch({ headless = HEADLESS } = {}) {
   if (!BROWSER_PATH) {
     throw new Error(
-      "Kein Browser gefunden. Setze die Umgebungsvariable GEMINI_BROWSER_PATH auf deine chrome.exe / brave.exe / msedge.exe."
+      "No browser found. Set the GEMINI_BROWSER_PATH environment variable to your chrome.exe / brave.exe / msedge.exe."
     );
   }
   const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless,
     executablePath: BROWSER_PATH,
     viewport: { width: 1280, height: 900 },
-    // CSP umgehen, damit fetch() auf blob:-URLs (generierte Videos) klappt.
+    // Bypass CSP so fetch() on blob: URLs (generated videos) works.
     bypassCSP: true,
-    // Anti-Automation: damit Google den Login im gesteuerten Browser zulaesst.
+    // Anti-automation: lets Google allow the login in the controlled browser.
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--no-first-run",
@@ -143,8 +159,8 @@ async function ensurePage() {
   return page;
 }
 
-// Eingeloggt = Editor vorhanden UND kein "Anmelden"/"Sign in"-Button.
-// (Das Eingabefeld erscheint auf der Gemini-Landingpage auch ohne Login.)
+// Logged in = editor present AND no "Sign in"/"Anmelden" button.
+// (The input field also shows on the Gemini landing page when logged out.)
 const LOGIN_PREDICATE = () => {
   const hasEditor = !!document.querySelector('div.ql-editor[contenteditable="true"]');
   const hasSignIn = [...document.querySelectorAll("a,button")].some((e) =>
@@ -164,11 +180,11 @@ async function isLoggedIn(p) {
 }
 
 // ---------------------------------------------------------------------------
-// Datei-Upload (Multimodalitaet): "+" -> "Dateien hochladen" -> filechooser.
+// File upload (multimodality): "+" -> "Upload files" -> filechooser.
 // ---------------------------------------------------------------------------
 async function uploadFiles(p, files) {
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`Datei nicht gefunden: ${f}`);
+    if (!fs.existsSync(f)) throw new Error(`File not found: ${f}`);
   }
   if (process.env.GEMINI_DEBUG === "1") {
     await p
@@ -186,8 +202,8 @@ async function uploadFiles(p, files) {
   const trigger = p.getByRole("button", { name: SEL.uploadTriggerName }).first();
   await trigger.waitFor({ state: "visible", timeout: 30000 });
   await trigger.scrollIntoViewIfNeeded().catch(() => {});
-  // Echter Klick (User-Geste, noetig fuer den Datei-Dialog); bei
-  // Aktionsproblemen JS-Klick als Fallback, um das Menue zu oeffnen.
+  // Real click (user gesture, required for the file dialog); fall back to a
+  // JS click to open the menu if the action check fails.
   try {
     await trigger.click({ timeout: 8000 });
   } catch {
@@ -199,17 +215,17 @@ async function uploadFiles(p, files) {
     .first();
   await menuItem.waitFor({ state: "visible", timeout: 8000 });
 
-  // Der Menue-Klick muss eine echte User-Geste sein, damit der
-  // Datei-Dialog (filechooser) ausgeloest wird.
+  // The menu click must be a real user gesture so the file dialog
+  // (filechooser) is triggered.
   const [chooser] = await Promise.all([
     p.waitForEvent("filechooser", { timeout: 10000 }),
     menuItem.click(),
   ]);
   await chooser.setFiles(files);
 
-  // Warten bis die Vorschau/Chips erscheinen (Upload verarbeitet).
+  // Wait for the preview/chips to appear (upload processed).
   await p.waitForTimeout(1500);
-  // Best-effort: warten bis evtl. "wird hochgeladen"-Spinner verschwindet.
+  // Best effort: wait until any "uploading" spinner disappears.
   await p
     .waitForFunction(() => !document.querySelector('[role="progressbar"]'), {
       timeout: 60000,
@@ -218,7 +234,7 @@ async function uploadFiles(p, files) {
 }
 
 // ---------------------------------------------------------------------------
-// Modell auswaehlen (Dropdown im Eingabebereich).
+// Select a model (dropdown in the input area).
 // ---------------------------------------------------------------------------
 async function selectModel(p, model) {
   if (!model) return;
@@ -226,7 +242,7 @@ async function selectModel(p, model) {
   const target = MODEL_MAP[key];
   if (!target) {
     throw new Error(
-      `Unbekanntes Modell "${model}". Erlaubt: ${Object.keys(MODEL_MAP).join(", ")}`
+      `Unknown model "${model}". Allowed: ${Object.keys(MODEL_MAP).join(", ")}`
     );
   }
   const trigger = p.getByRole("button", { name: SEL.modelTriggerName }).first();
@@ -239,7 +255,7 @@ async function selectModel(p, model) {
 }
 
 // ---------------------------------------------------------------------------
-// "+"-Menue oeffnen und einen Modus-Schalter (Bild/Video) aktivieren.
+// Open the "+" menu and toggle a mode (image/video).
 // ---------------------------------------------------------------------------
 async function enableMode(p, modeName) {
   const trigger = p.getByRole("button", { name: SEL.uploadTriggerName }).first();
@@ -256,7 +272,7 @@ async function enableMode(p, modeName) {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt in den Editor schreiben und absenden.
+// Type the prompt into the editor and send it.
 // ---------------------------------------------------------------------------
 async function sendPrompt(p, prompt) {
   const editor = p.locator(SEL.editor).first();
@@ -266,7 +282,7 @@ async function sendPrompt(p, prompt) {
 }
 
 // ---------------------------------------------------------------------------
-// Auf stabilen Antworttext warten (Streaming fertig).
+// Wait until the response text is stable (streaming finished).
 // ---------------------------------------------------------------------------
 async function waitForStableText(p, before, deadline) {
   while (Date.now() < deadline) {
@@ -297,13 +313,13 @@ async function waitForStableText(p, before, deadline) {
 }
 
 // ---------------------------------------------------------------------------
-// Generierte Medien (Bild/Video) aus der letzten Antwort holen und speichern.
-// In-Page-fetch -> base64 (laeuft mit den Login-Cookies, funktioniert fuer
-// blob:/https:/data:-Quellen).
+// Pull generated media (image/video) from the last response and save it.
+// Images: drawn to a <canvas> (works around the page's fetch CSP).
+// Videos: downloaded server-side with the session cookies (signed URLs).
 // ---------------------------------------------------------------------------
 async function extractMedia(p, kind, deadline) {
-  const minDim = 200; // UI-Icons/Avatare ausfiltern
-  // 1) Warten bis ein echtes Medium in der letzten Antwort geladen ist.
+  const minDim = 200; // filter out UI icons/avatars
+  // 1) Wait until a real medium has loaded in the last response.
   while (Date.now() < deadline) {
     const ready = await p
       .evaluate(
@@ -335,7 +351,7 @@ async function extractMedia(p, kind, deadline) {
       .evaluate(() => {
         const resp = document.querySelectorAll("model-response");
         const last = resp[resp.length - 1];
-        if (!last) return { responses: resp.length, note: "keine model-response" };
+        if (!last) return { responses: resp.length, note: "no model-response" };
         const imgs = [...last.querySelectorAll("img")].map((im) => ({
           w: im.naturalWidth,
           h: im.naturalHeight,
@@ -356,10 +372,10 @@ async function extractMedia(p, kind, deadline) {
     process.stderr.write("[debug media] " + JSON.stringify(dbg, null, 2) + "\n");
   }
 
-  // 2) Medien-Bytes holen.
+  // 2) Grab the media bytes.
   let media = [];
   if (kind === "video") {
-    // Video-<src> einsammeln; meist eine signierte https-URL (cross-origin).
+    // Collect <video> srcs; usually a signed cross-origin https URL.
     const urls = await p.evaluate(() => {
       const resp = document.querySelectorAll("model-response");
       const last = resp[resp.length - 1];
@@ -368,11 +384,11 @@ async function extractMedia(p, kind, deadline) {
         .map((v) => v.currentSrc || v.src)
         .filter(Boolean);
     });
-    const apiCtx = p.context().request; // Node-seitiger Fetch -> kein CORS
+    const apiCtx = p.context().request; // server-side fetch -> no CORS
     for (const url of urls) {
       try {
         if (url.startsWith("blob:")) {
-          // blob: nur in-page erreichbar (bypassCSP aktiv).
+          // blob: is only reachable in-page (bypassCSP is on).
           const b64 = await p.evaluate(async (u) => {
             const r = await fetch(u);
             const b = await r.blob();
@@ -397,7 +413,7 @@ async function extractMedia(p, kind, deadline) {
       }
     }
   } else {
-    // Bild: <img> auf Canvas zeichnen und exportieren -> umgeht fetch-CSP.
+    // Image: draw the <img> onto a canvas and export it -> bypasses the fetch CSP.
     media = await p.evaluate(
       ({ minDim }) => {
         const resp = document.querySelectorAll("model-response");
@@ -440,7 +456,7 @@ async function extractMedia(p, kind, deadline) {
     );
   }
 
-  // 3) Auf die Platte schreiben (Buffer oder base64).
+  // 3) Write to disk (Buffer or base64).
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const saved = [];
   const stamp = Date.now();
@@ -468,7 +484,7 @@ async function extractMedia(p, kind, deadline) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernfunktion: Prompt senden, auf Antwort warten, Text zurueckgeben.
+// Core: send a prompt, wait for the answer, return the text.
 // ---------------------------------------------------------------------------
 async function askGemini({
   prompt,
@@ -477,7 +493,7 @@ async function askGemini({
   model = null,
   timeout_seconds = 180,
 }) {
-  if (!prompt || !prompt.trim()) throw new Error("prompt ist leer.");
+  if (!prompt || !prompt.trim()) throw new Error("prompt is empty.");
   const p = await ensurePage();
 
   if (new_chat) {
@@ -485,7 +501,7 @@ async function askGemini({
   }
   if (!(await isLoggedIn(p))) {
     throw new Error(
-      "Nicht bei Gemini eingeloggt. Bitte einmalig `npm run login` (bzw. `node server.js login`) ausfuehren und einloggen."
+      "Not logged in to Gemini. Run `npm run login` (or `node server.js login`) once and sign in."
     );
   }
 
@@ -504,28 +520,28 @@ async function askGemini({
 
   if (!lastText) {
     throw new Error(
-      "Keine Antwort von Gemini erkannt (Timeout oder UI-Aenderung). Selektoren in SEL pruefen."
+      "No answer detected from Gemini (timeout or UI change). Check the selectors in SEL."
     );
   }
   return lastText;
 }
 
 // ---------------------------------------------------------------------------
-// Bild generieren (Gemini "Bild erstellen" / Nano Banana).
+// Generate an image (Gemini "Create image" / Nano Banana).
 // ---------------------------------------------------------------------------
 async function generateImage({ prompt, new_chat = true, timeout_seconds = 180 }) {
-  if (!prompt || !prompt.trim()) throw new Error("prompt ist leer.");
+  if (!prompt || !prompt.trim()) throw new Error("prompt is empty.");
   const p = await ensurePage();
   if (new_chat) await p.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
   if (!(await isLoggedIn(p)))
-    throw new Error("Nicht bei Gemini eingeloggt. Bitte `npm run login` ausfuehren.");
+    throw new Error("Not logged in to Gemini. Run `npm run login`.");
 
   await enableMode(p, SEL.imageModeName);
   const before = await p.locator(SEL.response).count();
   await sendPrompt(p, prompt);
 
   const deadline = Date.now() + timeout_seconds * 1000;
-  // Warten bis eine neue Antwort erscheint.
+  // Wait until a new response appears.
   while (Date.now() < deadline) {
     if ((await p.locator(SEL.response).count()) > before) break;
     await p.waitForTimeout(500);
@@ -533,25 +549,25 @@ async function generateImage({ prompt, new_chat = true, timeout_seconds = 180 })
   const files = await extractMedia(p, "image", deadline);
   if (!files.length)
     throw new Error(
-      "Kein Bild gefunden (Timeout oder UI-Aenderung). Mit GEMINI_DEBUG=1 pruefen."
+      "No image found (timeout or UI change). Check with GEMINI_DEBUG=1."
     );
   return files;
 }
 
 // ---------------------------------------------------------------------------
-// Video generieren (Gemini "Video erstellen" / Veo). Dauert i.d.R. 1-3 Min.
+// Generate a video (Gemini "Create video" / Veo). Usually takes 1-3 min.
 // ---------------------------------------------------------------------------
 async function generateVideo({ prompt, new_chat = true, timeout_seconds = 420 }) {
-  if (!prompt || !prompt.trim()) throw new Error("prompt ist leer.");
+  if (!prompt || !prompt.trim()) throw new Error("prompt is empty.");
   const p = await ensurePage();
   if (new_chat) await p.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
   if (!(await isLoggedIn(p)))
-    throw new Error("Nicht bei Gemini eingeloggt. Bitte `npm run login` ausfuehren.");
+    throw new Error("Not logged in to Gemini. Run `npm run login`.");
 
   await enableMode(p, SEL.videoModeName);
 
-  // Einmaliges Onboarding-Popup ("Videos erstellen - Mit Gemini Omni")
-  // beim ersten Mal wegklicken.
+  // Dismiss the one-time onboarding popup ("Create videos - with Gemini Omni")
+  // on first use. [German UI label]
   const tryBtn = p.getByRole("button", { name: /Jetzt ausprobieren/i }).first();
   if (await tryBtn.isVisible().catch(() => false)) {
     await tryBtn.click().catch(() => {});
@@ -569,13 +585,13 @@ async function generateVideo({ prompt, new_chat = true, timeout_seconds = 420 })
   const files = await extractMedia(p, "video", deadline);
   if (!files.length)
     throw new Error(
-      "Kein Video gefunden (Timeout oder UI-Aenderung). Mit GEMINI_DEBUG=1 pruefen."
+      "No video found (timeout or UI change). Check with GEMINI_DEBUG=1."
     );
   return files;
 }
 
 // ---------------------------------------------------------------------------
-// Diagnose: ist das Profil wirklich eingeloggt?
+// Diagnostic: is the profile actually logged in?
 // ---------------------------------------------------------------------------
 async function runCheck() {
   const { context, pg } = await launch({ headless: true });
@@ -602,7 +618,7 @@ async function runCheck() {
 }
 
 // ---------------------------------------------------------------------------
-// Diagnose: alle Buttons im Eingabebereich dumpen (Selektor-Suche).
+// Diagnostic: dump all input-area button labels (selector hunting).
 // ---------------------------------------------------------------------------
 async function runDump() {
   const { context, pg } = await launch({ headless: true });
@@ -615,7 +631,7 @@ async function runDump() {
       icon: b.querySelector("mat-icon")?.textContent?.trim(),
       cls: (b.className || "").slice(0, 40),
     }));
-    // nur interessante (mit aria oder icon)
+    // only the interesting ones (with aria or icon)
     return btns.filter((b) => b.aria || b.icon).slice(0, 40);
   });
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
@@ -624,15 +640,15 @@ async function runDump() {
 }
 
 // ---------------------------------------------------------------------------
-// Login-Modus (einmalig).
+// Login mode (one-time).
 // ---------------------------------------------------------------------------
 async function runLogin() {
   process.stderr.write("\n>> Browser: " + BROWSER_PATH + "\n");
   const { context, pg } = await launch({ headless: false });
   await pg.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
   process.stderr.write(
-    ">> Bitte im geoeffneten Fenster bei Google/Gemini einloggen.\n" +
-      ">> Warte auf das Eingabefeld (max. 5 Min)...\n"
+    ">> Please sign in to Google/Gemini in the window that just opened.\n" +
+      ">> Waiting for the input field (up to 5 min)...\n"
   );
   try {
     await pg.waitForFunction(LOGIN_PREDICATE, null, {
@@ -640,23 +656,23 @@ async function runLogin() {
       polling: 1000,
     });
     process.stderr.write(
-      ">> Login erkannt. Profil gespeichert unter:\n   " +
+      ">> Login detected. Profile saved at:\n   " +
         USER_DATA_DIR +
-        "\n>> Fenster wird in 3s geschlossen.\n\n"
+        "\n>> Closing the window in 3s.\n\n"
     );
     await pg.waitForTimeout(3000);
   } catch {
-    process.stderr.write(">> Kein Login innerhalb 5 Min erkannt. Abbruch.\n");
+    process.stderr.write(">> No login detected within 5 min. Aborting.\n");
   }
   await context.close();
   process.exit(0);
 }
 
 // ---------------------------------------------------------------------------
-// CLI-Schnelltest.
+// Quick CLI test.
 // ---------------------------------------------------------------------------
 async function runAsk(args) {
-  // Tokens "--file=PFAD" = Upload, "--model=KEY" = Modell, Rest = Prompt.
+  // Tokens "--file=PATH" = upload, "--model=KEY" = model, rest = prompt.
   const files = [];
   const promptParts = [];
   let model = null;
@@ -666,8 +682,7 @@ async function runAsk(args) {
     else promptParts.push(a);
   }
   const prompt =
-    promptParts.join(" ") ||
-    "Sag in genau einem Satz Hallo und nenne das heutige Datum.";
+    promptParts.join(" ") || "Say hello in exactly one sentence.";
   const answer = await askGemini({ prompt, files, model });
   process.stdout.write("\n--- Gemini ---\n" + answer + "\n--------------\n");
   if (ctx) await ctx.close();
@@ -676,27 +691,27 @@ async function runAsk(args) {
 
 async function runImage(args) {
   const prompt = args.join(" ");
-  if (!prompt) throw new Error('Nutze: node server.js image "Bildbeschreibung"');
+  if (!prompt) throw new Error('Usage: node server.js image "image description"');
   const files = await generateImage({ prompt });
-  process.stdout.write("\n--- Bild(er) ---\n" + files.join("\n") + "\n");
+  process.stdout.write("\n--- image(s) ---\n" + files.join("\n") + "\n");
   if (ctx) await ctx.close();
   process.exit(0);
 }
 
 async function runVideo(args) {
   const prompt = args.join(" ");
-  if (!prompt) throw new Error('Nutze: node server.js video "Videobeschreibung"');
+  if (!prompt) throw new Error('Usage: node server.js video "video description"');
   const files = await generateVideo({ prompt });
-  process.stdout.write("\n--- Video(s) ---\n" + files.join("\n") + "\n");
+  process.stdout.write("\n--- video(s) ---\n" + files.join("\n") + "\n");
   if (ctx) await ctx.close();
   process.exit(0);
 }
 
-// Test-Helfer: Video-Modus betreten + Onboarding abfangen, OHNE zu generieren.
+// Test helper: enter video mode + dismiss onboarding, WITHOUT generating.
 async function runVmode() {
   const p = await ensurePage();
   await p.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
-  if (!(await isLoggedIn(p))) throw new Error("Nicht eingeloggt.");
+  if (!(await isLoggedIn(p))) throw new Error("Not logged in.");
   await enableMode(p, SEL.videoModeName);
   const tryBtn = p.getByRole("button", { name: /Jetzt ausprobieren/i }).first();
   const hadOnboard = await tryBtn.isVisible().catch(() => false);
@@ -719,23 +734,23 @@ async function runVmode() {
   process.exit(0);
 }
 
-// Test-Helfer: Medien aus einem bestehenden Chat extrahieren (ohne Generierung).
-// Nutze: node server.js extract video <chatUrl>
+// Test helper: extract media from an existing chat (without generating).
+// Usage: node server.js extract <image|video> <chatUrl>
 async function runExtract(args) {
   const kind = args[0] === "image" ? "image" : "video";
   const url = args[1];
-  if (!url) throw new Error("Nutze: node server.js extract <image|video> <chatUrl>");
+  if (!url) throw new Error("Usage: node server.js extract <image|video> <chatUrl>");
   const p = await ensurePage();
   await p.goto(url, { waitUntil: "domcontentloaded" });
   await p.waitForTimeout(4000);
   const files = await extractMedia(p, kind, Date.now() + 120000);
-  process.stdout.write("\n--- extrahiert ---\n" + files.join("\n") + "\n");
+  process.stdout.write("\n--- extracted ---\n" + files.join("\n") + "\n");
   if (ctx) await ctx.close();
   process.exit(0);
 }
 
 // ---------------------------------------------------------------------------
-// MCP-Server (stdio).
+// MCP server definition (shared by stdio and HTTP modes).
 // ---------------------------------------------------------------------------
 async function buildServer() {
   const { Server } = await import(
@@ -756,34 +771,34 @@ async function buildServer() {
       {
         name: "ask_gemini",
         description:
-          "Stellt eine Frage an Google Gemini ueber die eingeloggte Weboberflaeche (kein API-Key noetig). " +
-          "Unterstuetzt Multimodalitaet: optional Bilder/PDFs/Videos/Audio per Dateipfad mitschicken; " +
-          "Gemini analysiert sie und antwortet als Text. Modellwahl moeglich. Gibt Geminis Antworttext zurueck. " +
-          "Gut fuer Video-/Audio-Verstaendnis, sehr lange Dokumente oder eine Zweitmeinung eines anderen Modells.",
+          "Ask Google Gemini a question through the logged-in web UI (no API key needed). " +
+          "Supports multimodality: optionally attach images/PDFs/videos/audio by file path; " +
+          "Gemini analyzes them and answers as text. Model selection supported. Returns Gemini's answer text. " +
+          "Great for video/audio understanding, very long documents, or a second opinion from another model.",
         inputSchema: {
           type: "object",
           properties: {
-            prompt: { type: "string", description: "Die Frage / der Auftrag an Gemini." },
+            prompt: { type: "string", description: "The question / instruction for Gemini." },
             files: {
               type: "array",
               items: { type: "string" },
               description:
-                "Optional. Absolute Pfade zu Dateien (Bild/PDF/Video/Audio), die mitgeschickt werden.",
+                "Optional. Absolute paths to files (image/PDF/video/audio) to attach.",
             },
             model: {
               type: "string",
               enum: ["flash-lite", "flash", "pro"],
               description:
-                "Optional. Modell: 'flash-lite' (3.1 Flash-Lite, schnellste), 'flash' (3.5 Flash, vielseitig), 'pro' (3.1 Pro, komplexe Aufgaben). Default: aktuell gewaehltes.",
+                "Optional. Model: 'flash-lite' (3.1 Flash-Lite, fastest), 'flash' (3.5 Flash, versatile), 'pro' (3.1 Pro, complex tasks). Default: whatever is currently selected.",
             },
             new_chat: {
               type: "boolean",
               description:
-                "Optional. true = neuen Chat starten (kein Verlaufskontext). Default false.",
+                "Optional. true = start a new chat (no prior context). Default false (continue the current chat).",
             },
             timeout_seconds: {
               type: "number",
-              description: "Optional. Max. Wartezeit in Sekunden (Default 180).",
+              description: "Optional. Max wait time in seconds (default 180).",
             },
           },
           required: ["prompt"],
@@ -792,15 +807,15 @@ async function buildServer() {
       {
         name: "generate_image",
         description:
-          "Erzeugt ein Bild mit Gemini (Bildmodell 'Nano Banana') ueber die eingeloggte Web-UI. " +
-          "Speichert das/die Bild(er) auf die Platte und gibt die Dateipfade zurueck (als PNG/JPG lesbar). Kein API-Key.",
+          "Generate an image with Gemini's image model ('Nano Banana') through the logged-in web UI. " +
+          "Saves the image(s) to disk and returns the file paths (readable as PNG/JPG). No API key.",
         inputSchema: {
           type: "object",
           properties: {
-            prompt: { type: "string", description: "Bildbeschreibung." },
+            prompt: { type: "string", description: "Image description." },
             timeout_seconds: {
               type: "number",
-              description: "Optional. Max. Wartezeit in Sekunden (Default 180).",
+              description: "Optional. Max wait time in seconds (default 180).",
             },
           },
           required: ["prompt"],
@@ -809,16 +824,16 @@ async function buildServer() {
       {
         name: "generate_video",
         description:
-          "Erzeugt ein Video mit Gemini (Videomodell 'Veo') ueber die eingeloggte Web-UI. " +
-          "Dauert i.d.R. 1-3 Minuten und verbraucht Veo-Kontingent des Abos. " +
-          "Speichert das Video auf die Platte und gibt den Dateipfad zurueck (MP4). Kein API-Key.",
+          "Generate a video with Gemini's video model ('Veo') through the logged-in web UI. " +
+          "Usually takes 1-3 minutes and consumes the subscription's Veo quota. " +
+          "Saves the video to disk and returns the file path (MP4). No API key.",
         inputSchema: {
           type: "object",
           properties: {
-            prompt: { type: "string", description: "Videobeschreibung." },
+            prompt: { type: "string", description: "Video description." },
             timeout_seconds: {
               type: "number",
-              description: "Optional. Max. Wartezeit in Sekunden (Default 420).",
+              description: "Optional. Max wait time in seconds (default 420).",
             },
           },
           required: ["prompt"],
@@ -853,9 +868,9 @@ async function buildServer() {
             {
               type: "text",
               text:
-                "Bild(er) gespeichert:\n" +
+                "Image(s) saved:\n" +
                 files.join("\n") +
-                "\n(Mit dem Read-Tool oeffnen, um sie anzusehen.)",
+                "\n(Open them with the Read tool to view.)",
             },
           ],
         };
@@ -867,17 +882,17 @@ async function buildServer() {
             typeof a.timeout_seconds === "number" ? a.timeout_seconds : 420,
         });
         return {
-          content: [{ type: "text", text: "Video gespeichert:\n" + files.join("\n") }],
+          content: [{ type: "text", text: "Video saved:\n" + files.join("\n") }],
         };
       }
       return {
         isError: true,
-        content: [{ type: "text", text: `Unbekanntes Tool: ${name}` }],
+        content: [{ type: "text", text: `Unknown tool: ${name}` }],
       };
     } catch (err) {
       return {
         isError: true,
-        content: [{ type: "text", text: "Fehler: " + (err?.message || String(err)) }],
+        content: [{ type: "text", text: "Error: " + (err?.message || String(err)) }],
       };
     }
   });
@@ -886,7 +901,7 @@ async function buildServer() {
 }
 
 // ---------------------------------------------------------------------------
-// stdio-Modus (fuer Claude Code).
+// stdio mode (for most MCP clients, e.g. Claude Code / Claude Desktop).
 // ---------------------------------------------------------------------------
 async function runMcp() {
   const { StdioServerTransport } = await import(
@@ -895,12 +910,12 @@ async function runMcp() {
   const server = await buildServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("gemini-bridge MCP-Server laeuft (stdio).\n");
+  process.stderr.write("gemini-bridge MCP server running (stdio).\n");
 }
 
 // ---------------------------------------------------------------------------
-// HTTP-Modus (Streamable HTTP) -- fuer Claude Desktop als Remote-Connector.
-// URL zum Eintragen:  http://localhost:<PORT>/mcp   (Default-Port 7801)
+// HTTP mode (Streamable HTTP) -- for MCP clients that connect to a URL.
+// URL: http://localhost:<PORT>/mcp   (default port 7801)
 // ---------------------------------------------------------------------------
 async function runHttp() {
   const http = await import("node:http");
@@ -929,8 +944,8 @@ async function runHttp() {
     });
 
   const handler = async (req, res) => {
-    // CORS: der Claude-App-Renderer greift cross-origin zu und muss u. a. den
-    // mcp-session-id-Header lesen koennen (sonst bleibt die Verbindung haengen).
+    // CORS: a browser-based MCP client connects cross-origin and needs to read
+    // the mcp-session-id header (otherwise the connection just hangs).
     const origin = req.headers.origin || "*";
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
@@ -997,7 +1012,7 @@ async function runHttp() {
             .end(
               JSON.stringify({
                 jsonrpc: "2.0",
-                error: { code: -32000, message: "Keine gueltige Session." },
+                error: { code: -32000, message: "No valid session." },
                 id: null,
               })
             );
@@ -1006,7 +1021,7 @@ async function runHttp() {
         await transport.handleRequest(req, res, body);
       } else if (req.method === "GET" || req.method === "DELETE") {
         if (!sessionId || !transports[sessionId]) {
-          res.writeHead(400).end("Ungueltige oder fehlende Session-ID.");
+          res.writeHead(400).end("Invalid or missing session id.");
           return;
         }
         await transports[sessionId].handleRequest(req, res);
@@ -1014,8 +1029,8 @@ async function runHttp() {
         res.writeHead(405).end("Method not allowed");
       }
     } catch (err) {
-      process.stderr.write("HTTP-Fehler: " + (err?.message || err) + "\n");
-      if (!res.headersSent) res.writeHead(500).end("Serverfehler");
+      process.stderr.write("HTTP error: " + (err?.message || err) + "\n");
+      if (!res.headersSent) res.writeHead(500).end("Server error");
     }
   };
 
@@ -1037,7 +1052,7 @@ async function runHttp() {
     process.stderr.write(
       "gemini-bridge " +
         scheme.toUpperCase() +
-        "-MCP laeuft auf " +
+        "-MCP running at " +
         scheme +
         "://localhost:" +
         PORT +
@@ -1047,7 +1062,7 @@ async function runHttp() {
 }
 
 // ---------------------------------------------------------------------------
-// Einstiegspunkt.
+// Entry point.
 // ---------------------------------------------------------------------------
 const mode = process.argv[2];
 if (mode === "login") {
@@ -1072,7 +1087,7 @@ if (mode === "login") {
   runMcp();
 }
 
-// sauberes Beenden
+// clean shutdown
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, async () => {
     try {
